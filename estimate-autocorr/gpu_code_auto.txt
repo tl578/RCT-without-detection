@@ -1,0 +1,145 @@
+auto2_code = """
+#include <math.h>
+#include <cuComplex.h>
+typedef cuDoubleComplex cmplx ;
+const double PI = 3.14159265358979324 ;
+__global__ void moments_2nd( cmplx *xf, cmplx *A2k, int *info )
+{
+    int thread_idx, num_threads, patch_ct, N1, D1, M, k_idx ;
+    int j, f_idx, g_idx, kx, ky, stride_sz, idx_min, idx_max ;
+    double theta ;
+    cmplx fv, gv ;
+
+    thread_idx = threadIdx.x + blockDim.x*blockIdx.x ;
+    num_threads = blockDim.x*gridDim.x ;
+
+    patch_ct = info[0] ;
+    N1 = info[1] ;
+    D1 = N1/2 + 1 ;
+    M = N1*D1 ;
+    
+    stride_sz = M / num_threads ;
+    if (M % num_threads != 0)
+        stride_sz += 1 ;
+
+    idx_min = thread_idx*stride_sz ;
+    idx_max = idx_min + stride_sz ;
+    if (idx_max > M-1)
+        idx_max = M ;
+
+    for (j = 0 ; j < patch_ct ; j++){
+        f_idx = 2*j*M ;
+        g_idx = (2*j+1)*M ;
+        for (k_idx = idx_min ; k_idx < idx_max ; k_idx++){
+            fv = xf[f_idx + k_idx] ;
+            gv = cuConj(xf[g_idx + k_idx]) ;
+            A2k[k_idx] = cuCadd(A2k[k_idx], cuCmul(fv, gv)) ;
+        }
+    }
+
+    for (k_idx = idx_min ; k_idx < idx_max ; k_idx++){
+        kx = k_idx / D1 ;
+        ky = k_idx % D1 ;
+        theta = (kx + ky - N1)*PI ;
+        A2k[k_idx] = cuCmul(A2k[k_idx], \
+            make_cuDoubleComplex(cos(theta), -sin(theta))) ;
+    }
+}
+"""
+
+
+auto3_code = """
+#include <stdio.h>
+#include <math.h>
+#include <cuComplex.h>
+typedef cuDoubleComplex cmplx ;
+const double PI = 3.14159265358979324 ;
+__global__ void moments_3rd( cmplx *xf, cmplx *pA3k, int *info )
+{
+    int bx, sx, tx, patch_ct, N1, outer_iter_ct, block_sz ;   
+    int i, j, s, p_idx, p_idx_offset, num_iter, stride_sz ;
+    int k1x_offset, k1x, k1y, k2x, k2y, k3x, k3y, inc ;
+    int D1, D2, D3, f1_idx, f2_idx, g_idx, rid ;
+    cmplx fv1, fv2, gv ;
+    double theta ;
+
+    bx = blockIdx.x ;
+    tx = threadIdx.x ;
+
+    patch_ct = info[0] ;
+    N1 = info[1] ;
+    outer_iter_ct = info[2] ;
+    block_sz = info[3] ;
+
+    k1x_offset = outer_iter_ct*block_sz ;
+    num_iter = N1*block_sz/gridDim.x + 1 ;
+        
+    D1 = N1/2 + 1 ;
+    D2 = N1*D1 ;
+    D3 = N1*D2 ;
+    stride_sz = D2 / blockDim.x + 1 ;
+    inc = 2*D2 ;
+
+    for (i = 0 ; i < num_iter ; i++){
+        rid = i*gridDim.x + bx ;
+        if (rid > N1*block_sz - 1)
+            break ;
+
+        k1x = rid / N1 + k1x_offset ;
+        k2x = rid % N1 ;
+        k3x = (2*N1 - (k1x+k2x)) % N1 ;
+        p_idx_offset = (k1x - k1x_offset)*D3 + k2x*D1 ;
+
+        if (k1x > N1-1)
+            continue ;
+
+        for (s = 0 ; s < stride_sz ; s++){
+            sx = s*blockDim.x + tx ;
+            if (sx > D2-1)
+                break ;
+
+            k1y = sx / D1 ;
+            k2y = sx % D1 ;
+            k3y = (2*N1 - (k1y+k2y)) % N1 ;
+            p_idx = p_idx_offset + k1y*D2 + k2y ;
+
+            if (k1y < D1)
+                f1_idx = k1x*D1 + k1y ;
+            else
+                f1_idx = ((N1-k1x) % N1)*D1 + (N1-k1y) ;
+
+            f2_idx = k2x*D1 + k2y ;
+
+            if (k3y < D1)
+                g_idx = D2 + k3x*D1 + k3y ;
+            else
+                g_idx = D2 + ((N1-k3x) % N1)*D1 + (N1-k3y) ;
+
+            for (j = 0 ; j < patch_ct ; j++){
+
+                if (k1y < D1)
+                    fv1 = xf[f1_idx] ;
+                else
+                    fv1 = cuConj(xf[f1_idx]) ;
+
+                fv2 = xf[f2_idx] ;
+
+                if (k3y < D1)
+                    gv = xf[g_idx] ;
+                else
+                    gv = cuConj(xf[g_idx]) ;
+
+                pA3k[p_idx] = cuCadd(pA3k[p_idx], cuCmul(fv1, cuCmul(fv2, gv))) ;
+                
+                f1_idx += inc ;
+                f2_idx += inc ;
+                g_idx += inc ;
+            }
+
+            theta = (k1x + k1y + k2x + k2y)*PI ;
+            pA3k[p_idx] = cuCmul(pA3k[p_idx], \
+                make_cuDoubleComplex(cos(theta), -sin(theta))) ;
+        }
+    }
+}
+"""
